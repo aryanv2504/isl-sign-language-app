@@ -1,3 +1,13 @@
+import gdown
+import os
+
+FILE_ID = "1ma9c9NjI9wuFSF3KFFYACdjaKD2Tvh5w"
+MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
+MODEL_PATH = "isl_model.tflite"
+
+# Download the model if not already present
+if not os.path.exists(MODEL_PATH):
+    gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
 import streamlit as st
 import cv2
 import numpy as np
@@ -194,3 +204,4 @@ if run:
         camera_placeholder.image(frame, channels="BGR")
 
     cap.release()
+
