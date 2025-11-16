@@ -1,0 +1,6 @@
+streamlit
+opencv-python-headless
+mediapipe
+tensorflow-cpu==2.12.0
+numpy
+gdown
