@@ -3,7 +3,7 @@ import gdown
 import streamlit as st
 import cv2
 import numpy as np
-import tensorflow as tf
+import tflite_runtime.interpreter as tflite
 from ultralytics import YOLO
 from collections import deque
 
@@ -31,7 +31,7 @@ hand_detector = YOLO(HAND_MODEL)
 # =========================================================
 # Load TFLite Interpreter
 # =========================================================
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter = tflite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
@@ -108,7 +108,6 @@ if run:
 
         # --------------------------------
         # Classify EACH hand separately
-        # Use the one with BEST confidence
         # --------------------------------
         best_label = None
         best_conf = 0
@@ -118,7 +117,7 @@ if run:
             if crop.size == 0:
                 continue
 
-            resized = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (96,96))
+            resized = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (96, 96))
             inp = np.expand_dims(resized / 255.0, axis=0).astype(np.float32)
 
             interpreter.set_tensor(input_details[0]['index'], inp)
@@ -129,17 +128,17 @@ if run:
             model_conf = float(out[idx])
             label = labels[idx]
 
-            combined = model_conf * det_conf   # simple & accurate
+            combined = model_conf * det_conf   
 
             if combined > best_conf:
                 best_conf = combined
                 best_label = label
                 best_box = box
 
-        # Draw best hand bounding box
+        # Draw box
         if best_box:
             x1, y1, x2, y2 = best_box
-            cv2.rectangle(frame, (x1,y1),(x2,y2),(0,255,255),2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
         # -------------------------
         # Prediction Smoothing
@@ -148,12 +147,11 @@ if run:
             pred_queue.append((best_label, best_conf))
             ema_scores[best_label] = ema_alpha * best_conf + (1 - ema_alpha) * ema_scores.get(best_label, 0)
 
-        # choose best via EMA
         display_label = None
+
         if ema_scores:
             display_label = max(ema_scores, key=lambda k: ema_scores[k])
 
-        # fallback = majority vote
         if not display_label and pred_queue:
             votes = {}
             for l, c in pred_queue:
@@ -171,7 +169,7 @@ if run:
                 lock_ph.empty()
         else:
             if display_label:
-                strong = sum(1 for l,c in pred_queue if l == display_label and c > 0.80)
+                strong = sum(1 for l, c in pred_queue if l == display_label and c > 0.80)
                 if strong > 10:
                     locked_letter = display_label
                     lock_counter = lock_frames
