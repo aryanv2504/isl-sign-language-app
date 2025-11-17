@@ -1,207 +1,183 @@
-import gdown
 import os
-
-FILE_ID = "1ma9c9NjI9wuFSF3KFFYACdjaKD2Tvh5w"
-MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
-MODEL_PATH = "isl_model.tflite"
-
-# Download the model if not already present
-if not os.path.exists(MODEL_PATH):
-    gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+import gdown
 import streamlit as st
 import cv2
 import numpy as np
 import tensorflow as tf
-import mediapipe as mp
+from ultralytics import YOLO
 from collections import deque
 
-# ===============================
-# Streamlit Config
-# ===============================
-st.set_page_config(
-    page_title="ISL Sign Language App",
-    layout="wide",
-    page_icon="🤟"
-)
+# =========================================================
+# Load TFLite ISL Model
+# =========================================================
+FILE_ID = "1ma9c9NjI9wuFSF3KFFYACdjaKD2Tvh5w"
+MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
+MODEL_PATH = "isl_model.tflite"
 
-# ===============================
-# Custom CSS (simpler & centered)
-# ===============================
-st.markdown("""
-<style>
-    .main {
-        background: #0d0d0d;
-        color: white;
-    }
-    .centered {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        flex-direction: column;
-    }
-    .title {
-        text-align: center;
-        font-size: 42px;
-        font-weight: 800;
-        color: #00eaff;
-        text-shadow: 0 0 15px #00eaff;
-        margin-top: 5px;
-        margin-bottom: 5px;
-    }
-    .subtitle {
-        text-align: center;
-        font-size: 18px;
-        color: #cccccc;
-        margin-bottom: 20px;
-    }
-    .box {
-        background: rgba(0,255,255,0.08);
-        border: 2px solid #00eaff;
-        padding: 12px;
-        border-radius: 12px;
-        text-align: center;
-        width: 320px;
-        box-shadow: 0 0 15px #00eaff;
-        margin-top: 12px;
-    }
-    .locked-box {
-        background: rgba(0,255,0,0.08);
-        border: 2px solid #00ff88;
-        padding: 12px;
-        border-radius: 12px;
-        text-align: center;
-        width: 320px;
-        box-shadow: 0 0 15px #00ff88;
-        margin-top: 12px;
-    }
-</style>
-""", unsafe_allow_html=True)
+if not os.path.exists(MODEL_PATH):
+    gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
 
-# ===============================
-# Title
-# ===============================
-st.markdown("<div class='title'>ISL Sign Language App</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Real-time ISL Letter Recognition</div>", unsafe_allow_html=True)
+# =========================================================
+# Load YOLO Hand Detector
+# =========================================================
+HAND_MODEL = "hand_yolov8n.pt"
 
-# ===============================
-# Sidebar Control
-# ===============================
-st.sidebar.title("⚙️ Controls")
-run = st.sidebar.checkbox("Start Webcam")
+if not os.path.exists(HAND_MODEL):
+    st.error("❌ 'hand_yolov8n.pt' not found. Place it in the folder.")
+    st.stop()
 
-# ===============================
-# Load ML Model
-# ===============================
-labels = [line.strip() for line in open("labels.txt")]
+hand_detector = YOLO(HAND_MODEL)
 
-interpreter = tf.lite.Interpreter(model_path="isl_model.tflite")
+# =========================================================
+# Load TFLite Interpreter
+# =========================================================
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-mp_hands = mp.solutions.hands
-mp_draw = mp.solutions.drawing_utils
-hands = mp_hands.Hands(max_num_hands=2)
+labels = [line.strip().upper() for line in open("labels.txt")]
 
-# Prediction smoothing
-pred_queue = deque(maxlen=50)
+# =========================================================
+# Streamlit UI
+# =========================================================
+st.set_page_config(page_title="ISL Sign App", layout="wide")
+st.title("ISL Sign Language App")
+
+run = st.sidebar.checkbox("Start Webcam")
+
+# Smoothing
+pred_queue = deque(maxlen=20)
+ema_scores = {}
+ema_alpha = 0.25
+
 locked_letter = None
-lock_frames = 30
 lock_counter = 0
+lock_frames = 25
 
-# ===============================
-# SINGLE CENTER COLUMN (IMPORTANT)
-# ===============================
-root = st.container()
-with root:
-    col = st.columns([1, 2, 1])[1]   # center column only
+frame_ph = st.empty()
+pred_ph = st.empty()
+lock_ph = st.empty()
 
-    with col:
-        camera_placeholder = st.empty()
-        prediction_placeholder = st.empty()
-        locked_placeholder = st.empty()
-
-# ===============================
+# =========================================================
 # Webcam Loop
-# ===============================
+# =========================================================
 if run:
     cap = cv2.VideoCapture(0)
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        ok, frame = cap.read()
+        if not ok:
             break
 
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        result = hands.process(rgb)
+        # -------------------------
+        # YOLO Hand Detection
+        # -------------------------
+        results = hand_detector(frame, conf=0.45, verbose=False)
+        hands = []
 
-        if result.multi_hand_landmarks:
-            all_x, all_y = [], []
-            for handLms in result.multi_hand_landmarks:
-                mp_draw.draw_landmarks(frame, handLms, mp_hands.HAND_CONNECTIONS)
-                for lm in handLms.landmark:
-                    all_x.append(lm.x)
-                    all_y.append(lm.y)
+        for r in results:
+            if r.boxes:
+                for b in r.boxes:
+                    det_conf = float(b.conf[0])
+                    if det_conf < 0.50:
+                        continue
 
-            xmin, xmax = int(min(all_x)*w), int(max(all_x)*w)
-            ymin, ymax = int(min(all_y)*h), int(max(all_y)*h)
+                    x1, y1, x2, y2 = map(int, b.xyxy[0].tolist())
 
-            pad = 25
-            xmin, ymin = max(0, xmin-pad), max(0, ymin-pad)
-            xmax, ymax = min(w, xmax+pad), min(h, ymax+pad)
+                    # square crop with padding
+                    bw, bh = x2 - x1, y2 - y1
+                    side = max(bw, bh)
+                    pad = int(side * 0.25)
 
-            crop = frame[ymin:ymax, xmin:xmax]
+                    xmin = max(0, x1 - pad)
+                    ymin = max(0, y1 - pad)
+                    xmax = min(w, x2 + pad)
+                    ymax = min(h, y2 + pad)
 
-            if crop.size != 0:
-                resized = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (96, 96))
-                input_data = np.expand_dims(resized / 255.0, axis=0).astype(np.float32)
+                    crop = frame[ymin:ymax, xmin:xmax]
+                    hands.append((crop, det_conf, (xmin, ymin, xmax, ymax)))
 
-                interpreter.set_tensor(input_details[0]['index'], input_data)
-                interpreter.invoke()
+        # If no hands
+        if not hands:
+            frame_ph.image(frame, channels="BGR")
+            continue
 
-                out = interpreter.get_tensor(output_details[0]['index'])[0]
-                idx = np.argmax(out)
-                conf = out[idx]
-                label = labels[idx].upper()
+        # --------------------------------
+        # Classify EACH hand separately
+        # Use the one with BEST confidence
+        # --------------------------------
+        best_label = None
+        best_conf = 0
+        best_box = None
 
-                pred_queue.append((label, conf))
+        for crop, det_conf, box in hands:
+            if crop.size == 0:
+                continue
 
-                # ============= LOCKING LOGIC FIXED =============
-                if locked_letter:
-                    locked_placeholder.markdown(
-                        f"<div class='locked-box'><h2>Locked: {locked_letter}</h2></div>",
-                        unsafe_allow_html=True
-                    )
-                    prediction_placeholder.empty()  # remove prediction box
+            resized = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (96,96))
+            inp = np.expand_dims(resized / 255.0, axis=0).astype(np.float32)
 
-                    lock_counter -= 1
-                    if lock_counter <= 0:
-                        locked_letter = None
-                        locked_placeholder.empty()
+            interpreter.set_tensor(input_details[0]['index'], inp)
+            interpreter.invoke()
 
-                else:
-                    counts = {}
-                    for l, c in pred_queue:
-                        if c > 0.90:
-                            counts[l] = counts.get(l, 0) + 1
+            out = interpreter.get_tensor(output_details[0]['index'])[0]
+            idx = np.argmax(out)
+            model_conf = float(out[idx])
+            label = labels[idx]
 
-                    if counts:
-                        best = max(counts, key=counts.get)
-                        if counts[best] > 30:
-                            locked_letter = best
-                            lock_counter = lock_frames
+            combined = model_conf * det_conf   # simple & accurate
 
-                    # SHOW ONLY ONE prediction box
-                    prediction_placeholder.markdown(
-                        f"<div class='box'><h3>Prediction: {label}</h3></div>",
-                        unsafe_allow_html=True
-                    )
+            if combined > best_conf:
+                best_conf = combined
+                best_label = label
+                best_box = box
 
-        # CENTERED CAMERA OUTPUT
-        camera_placeholder.image(frame, channels="BGR")
+        # Draw best hand bounding box
+        if best_box:
+            x1, y1, x2, y2 = best_box
+            cv2.rectangle(frame, (x1,y1),(x2,y2),(0,255,255),2)
+
+        # -------------------------
+        # Prediction Smoothing
+        # -------------------------
+        if best_label:
+            pred_queue.append((best_label, best_conf))
+            ema_scores[best_label] = ema_alpha * best_conf + (1 - ema_alpha) * ema_scores.get(best_label, 0)
+
+        # choose best via EMA
+        display_label = None
+        if ema_scores:
+            display_label = max(ema_scores, key=lambda k: ema_scores[k])
+
+        # fallback = majority vote
+        if not display_label and pred_queue:
+            votes = {}
+            for l, c in pred_queue:
+                votes[l] = votes.get(l, 0) + c
+            display_label = max(votes, key=votes.get)
+
+        # -------------------------
+        # Locking
+        # -------------------------
+        if locked_letter:
+            lock_ph.markdown(f"### 🔒 Locked: **{locked_letter}**")
+            lock_counter -= 1
+            if lock_counter <= 0:
+                locked_letter = None
+                lock_ph.empty()
+        else:
+            if display_label:
+                strong = sum(1 for l,c in pred_queue if l == display_label and c > 0.80)
+                if strong > 10:
+                    locked_letter = display_label
+                    lock_counter = lock_frames
+
+                pred_ph.markdown(f"### Prediction: **{display_label}**")
+
+        frame_ph.image(frame, channels="BGR")
 
     cap.release()
-
